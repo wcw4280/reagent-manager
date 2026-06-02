@@ -90,6 +90,33 @@ def safe_text(value) -> str:
     return html.escape(str(value)) if value is not None else ""
 
 
+def display_text(value) -> str:
+    """
+    CSV에서 2216처럼 입력한 값이 2216.0으로 보이는 문제를 줄이기 위한 표시용 변환 함수.
+    """
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+
+    text = str(value).strip()
+    if text.lower() in ["nan", "none"]:
+        return ""
+
+    # 2216.0, 500.0처럼 끝이 .0인 숫자는 정수처럼 표시
+    try:
+        number = float(text)
+        if number.is_integer():
+            return str(int(number))
+    except Exception:
+        pass
+
+    return text
+
+
 def to_int(value, default: int = 0) -> int:
     try:
         if pd.isna(value):
@@ -394,6 +421,30 @@ def receive_count(reagent_id: str, amount: int, user_name: str) -> None:
     append_log(user_name, "입고", f"{name} ({volume})", receive_amount, message)
 
 
+def delete_reagent(reagent_id: str, user_name: str) -> None:
+    df = load_reagents()
+    idx_list = df.index[df["id"] == reagent_id].tolist()
+
+    if not idx_list:
+        st.error("해당 시약을 찾을 수 없습니다. 새로고침 후 다시 시도해 주세요.")
+        return
+
+    idx = idx_list[0]
+    name = df.at[idx, "name"]
+    volume = df.at[idx, "volume"]
+    stock = to_int(df.at[idx, "stock_count"])
+    waiting = to_int(df.at[idx, "waiting_count"])
+
+    df = df.drop(index=idx).reset_index(drop=True)
+    save_reagents(df)
+
+    message = (
+        f"{user_name}님이 {name} ({volume}) 시약을 삭제했습니다. "
+        f"삭제 당시 남은 수량: {stock}통, 배송 대기: {waiting}통"
+    )
+    append_log(user_name, "시약 삭제", f"{name} ({volume})", 0, message)
+
+
 def add_reagent(name: str, volume: str, manufacturer: str, location: str, stock_count: int, waiting_count: int, user_name: str) -> None:
     df = load_reagents()
     created = now_text()
@@ -577,11 +628,12 @@ with tab1:
                 card_context = st.container(border=True)
 
             with card_context:
-                c_name, c_stock, c_stock_btns, c_waiting, c_waiting_btns = st.columns([1.55, 0.8, 2.55, 0.8, 2.8])
+                c_name, c_stock, c_stock_btns, c_waiting, c_waiting_btns, c_delete = st.columns([1.25, 0.68, 2.25, 0.68, 2.25, 0.55])
 
                 with c_name:
-                    manufacturer = str(row.get("manufacturer", "")).strip()
-                    location = str(row.get("location", "")).strip()
+                    manufacturer = display_text(row.get("manufacturer", ""))
+                    location = display_text(row.get("location", ""))
+                    volume_text = display_text(row["volume"])
                     extra_info = ""
                     if manufacturer:
                         extra_info += f"<div class='reagent-volume'>회사: {safe_text(manufacturer)}</div>"
@@ -590,7 +642,7 @@ with tab1:
 
                     st.markdown(
                         f"<div class='reagent-name'>{safe_text(row['name'])}</div>"
-                        f"<div class='reagent-volume'>용량: {safe_text(row['volume'])}</div>"
+                        f"<div class='reagent-volume'>용량: {safe_text(volume_text)}</div>"
                         f"{extra_info}",
                         unsafe_allow_html=True,
                     )
@@ -653,6 +705,14 @@ with tab1:
                             if require_user(user_name):
                                 receive_count(rid, 5, user_name)
                                 st.rerun()
+
+                with c_delete:
+                    st.markdown("<div style='height: 0.15rem;'></div>", unsafe_allow_html=True)
+                    delete_checked = st.checkbox("삭제 확인", key=f"delete_check_{rid}")
+                    if st.button("삭제", key=f"delete_{rid}", use_container_width=True, disabled=not delete_checked):
+                        if require_user(user_name):
+                            delete_reagent(rid, user_name)
+                            st.rerun()
 
 
 # ------------------------------------------------------------
