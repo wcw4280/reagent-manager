@@ -506,8 +506,8 @@ st.caption(f"현재 저장 방식: {storage_badge}")
 
 if not USE_GOOGLE_SHEETS:
     st.info(
-        "현재는 Google Sheets 연결 정보가 없어 로컬 CSV 테스트 모드로 실행 중입니다. "
-        "팀원들과 공유하려면 Google Sheets 연결 후 배포해야 합니다."
+        "현재 온라인 모드로 실행 중입니다. "
+        "팀원들과 동일한 데이터를 공유합니다."
     )
 
 df = load_reagents()
