@@ -45,6 +45,8 @@ REAGENT_COLUMNS = [
     "id",
     "name",
     "volume",
+    "manufacturer",
+    "location",
     "stock_count",
     "waiting_count",
     "created_at",
@@ -117,6 +119,8 @@ def normalize_reagents(df: pd.DataFrame) -> pd.DataFrame:
     df["id"] = df["id"].astype(str)
     df["name"] = df["name"].astype(str)
     df["volume"] = df["volume"].astype(str)
+    df["manufacturer"] = df["manufacturer"].astype(str)
+    df["location"] = df["location"].astype(str)
     df["stock_count"] = df["stock_count"].apply(lambda x: max(0, to_int(x)))
     df["waiting_count"] = df["waiting_count"].apply(lambda x: max(0, to_int(x)))
     df["created_at"] = df["created_at"].astype(str)
@@ -390,7 +394,7 @@ def receive_count(reagent_id: str, amount: int, user_name: str) -> None:
     append_log(user_name, "입고", f"{name} ({volume})", receive_amount, message)
 
 
-def add_reagent(name: str, volume: str, stock_count: int, waiting_count: int, user_name: str) -> None:
+def add_reagent(name: str, volume: str, manufacturer: str, location: str, stock_count: int, waiting_count: int, user_name: str) -> None:
     df = load_reagents()
     created = now_text()
 
@@ -398,6 +402,8 @@ def add_reagent(name: str, volume: str, stock_count: int, waiting_count: int, us
         "id": make_id(),
         "name": name.strip(),
         "volume": volume.strip(),
+        "manufacturer": manufacturer.strip(),
+        "location": location.strip(),
         "stock_count": max(0, int(stock_count)),
         "waiting_count": max(0, int(waiting_count)),
         "created_at": created,
@@ -407,8 +413,15 @@ def add_reagent(name: str, volume: str, stock_count: int, waiting_count: int, us
     df.loc[len(df)] = new_row
     save_reagents(df)
 
+    detail_parts = [new_row['volume']]
+    if new_row.get('manufacturer'):
+        detail_parts.append(new_row['manufacturer'])
+    if new_row.get('location'):
+        detail_parts.append(new_row['location'])
+    detail_text = " / ".join(detail_parts)
+
     message = (
-        f"{user_name}님이 신규 시약 {new_row['name']} ({new_row['volume']})을 등록했습니다. "
+        f"{user_name}님이 신규 시약 {new_row['name']} ({detail_text})을 등록했습니다. "
         f"남은 수량: {new_row['stock_count']}통, 배송 대기: {new_row['waiting_count']}통"
     )
     append_log(user_name, "신규 등록", f"{new_row['name']} ({new_row['volume']})", stock_count, message)
@@ -564,12 +577,21 @@ with tab1:
                 card_context = st.container(border=True)
 
             with card_context:
-                c_name, c_stock, c_stock_btns, c_waiting, c_waiting_btns = st.columns([2.1, 0.8, 2.5, 0.8, 2.8])
+                c_name, c_stock, c_stock_btns, c_waiting, c_waiting_btns = st.columns([1.55, 0.8, 2.55, 0.8, 2.8])
 
                 with c_name:
+                    manufacturer = str(row.get("manufacturer", "")).strip()
+                    location = str(row.get("location", "")).strip()
+                    extra_info = ""
+                    if manufacturer:
+                        extra_info += f"<div class='reagent-volume'>회사: {safe_text(manufacturer)}</div>"
+                    if location:
+                        extra_info += f"<div class='reagent-volume'>보관장소: {safe_text(location)}</div>"
+
                     st.markdown(
                         f"<div class='reagent-name'>{safe_text(row['name'])}</div>"
-                        f"<div class='reagent-volume'>용량: {safe_text(row['volume'])}</div>",
+                        f"<div class='reagent-volume'>용량: {safe_text(row['volume'])}</div>"
+                        f"{extra_info}",
                         unsafe_allow_html=True,
                     )
 
@@ -642,6 +664,8 @@ with tab2:
     with st.form("new_reagent_form", clear_on_submit=True):
         name = st.text_input("시약 이름", placeholder="예: Acetone")
         volume = st.text_input("용량", placeholder="예: 500 mL, 1 L, 100 g")
+        manufacturer = st.text_input("회사", placeholder="예: Sigma-Aldrich, Daejung, TCI")
+        location = st.text_input("보관장소", placeholder="예: 시약장 A-2, 냉장고 1번칸")
         stock_count = st.number_input("현재 남은 수량", min_value=0, value=0, step=1)
         waiting_count = st.number_input("배송 대기 수량", min_value=0, value=0, step=1)
 
@@ -656,7 +680,7 @@ with tab2:
         elif not volume.strip():
             st.error("용량을 입력해 주세요.")
         else:
-            add_reagent(name, volume, stock_count, waiting_count, user_name)
+            add_reagent(name, volume, manufacturer, location, stock_count, waiting_count, user_name)
             st.success(f"{name.strip()} 시약을 등록했습니다.")
             st.rerun()
 
