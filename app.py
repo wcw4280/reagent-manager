@@ -1,18 +1,9 @@
 import html
-import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
-
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-except Exception:
-    gspread = None
-    Credentials = None
 
 try:
     import extra_streamlit_components as stx
@@ -27,6 +18,13 @@ try:
 except Exception:
     stylable_container = None
     STYLABLE_CONTAINER_AVAILABLE = False
+
+try:
+    from supabase import create_client
+    SUPABASE_AVAILABLE = True
+except Exception:
+    create_client = None
+    SUPABASE_AVAILABLE = False
 
 
 # ============================================================
@@ -62,15 +60,11 @@ LOG_COLUMNS = [
     "message",
 ]
 
-LOCAL_DATA_DIR = Path("data")
-LOCAL_REAGENTS_FILE = LOCAL_DATA_DIR / "reagents.csv"
-LOCAL_LOGS_FILE = LOCAL_DATA_DIR / "logs.csv"
-
 CARD_COLORS = [
-    {"bg": "#EAF4FF", "border": "#BBD9FF"},  # light blue
-    {"bg": "#FFF1F1", "border": "#FFC9C9"},  # light red
-    {"bg": "#F0FFF4", "border": "#BFE8C7"},  # light green
-    {"bg": "#FFF9E8", "border": "#F3DFA3"},  # light yellow
+    {"bg": "#EAF4FF", "border": "#BBD9FF"},
+    {"bg": "#FFF1F1", "border": "#FFC9C9"},
+    {"bg": "#F0FFF4", "border": "#BFE8C7"},
+    {"bg": "#FFF9E8", "border": "#F3DFA3"},
 ]
 
 
@@ -82,18 +76,11 @@ def now_text() -> str:
     return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def make_id() -> str:
-    return uuid.uuid4().hex[:10]
-
-
 def safe_text(value) -> str:
     return html.escape(str(value)) if value is not None else ""
 
 
 def display_text(value) -> str:
-    """
-    CSV에서 2216처럼 입력한 값이 2216.0으로 보이는 문제를 줄이기 위한 표시용 변환 함수.
-    """
     if value is None:
         return ""
     try:
@@ -106,7 +93,6 @@ def display_text(value) -> str:
     if text.lower() in ["nan", "none"]:
         return ""
 
-    # 2216.0, 500.0처럼 끝이 .0인 숫자는 정수처럼 표시
     try:
         number = float(text)
         if number.is_integer():
@@ -152,11 +138,6 @@ def normalize_reagents(df: pd.DataFrame) -> pd.DataFrame:
     df["waiting_count"] = df["waiting_count"].apply(lambda x: max(0, to_int(x)))
     df["created_at"] = df["created_at"].astype(str)
     df["updated_at"] = df["updated_at"].astype(str)
-
-    empty_id = df["id"].str.strip() == ""
-    if empty_id.any():
-        df.loc[empty_id, "id"] = [make_id() for _ in range(empty_id.sum())]
-
     return df
 
 
@@ -225,115 +206,95 @@ def require_user(user_name: str) -> bool:
 
 
 # ============================================================
-# 저장소 설정: Google Sheets 우선, 없으면 로컬 CSV
+# Supabase 연결
 # ============================================================
 
-def has_google_sheet_secrets() -> bool:
+def has_supabase_secrets() -> bool:
     try:
-        return bool(st.secrets.get("spreadsheet_id")) and bool(st.secrets.get("gcp_service_account"))
+        return bool(st.secrets.get("SUPABASE_URL")) and bool(st.secrets.get("SUPABASE_KEY"))
     except Exception:
         return False
 
 
-USE_GOOGLE_SHEETS = has_google_sheet_secrets()
+USE_SUPABASE = has_supabase_secrets()
 
 
 @st.cache_resource
-def get_google_worksheets():
-    if not USE_GOOGLE_SHEETS:
-        return None, None
-
-    if gspread is None or Credentials is None:
-        st.error("Google Sheets 사용을 위해 gspread, google-auth 설치가 필요합니다.")
+def get_supabase_client():
+    if not SUPABASE_AVAILABLE:
+        st.error("Supabase 사용을 위해 requirements.txt에 supabase가 필요합니다.")
         st.stop()
 
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
+    if not USE_SUPABASE:
+        st.error("Streamlit Secrets에 SUPABASE_URL, SUPABASE_KEY가 없습니다.")
+        st.stop()
 
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=scopes,
-    )
-    client = gspread.authorize(creds)
-    spreadsheet = client.open_by_key(st.secrets["spreadsheet_id"])
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
-    def get_or_create_ws(title: str, columns: list[str]):
-        try:
-            ws = spreadsheet.worksheet(title)
-        except gspread.WorksheetNotFound:
-            ws = spreadsheet.add_worksheet(title=title, rows=1000, cols=max(len(columns), 5))
-            ws.update(values=[columns], range_name="A1")
-            return ws
 
-        header = ws.row_values(1)
-        if not header:
-            ws.update(values=[columns], range_name="A1")
-        return ws
-
-    reagents_ws = get_or_create_ws("Reagents", REAGENT_COLUMNS)
-    logs_ws = get_or_create_ws("Logs", LOG_COLUMNS)
-
-    return reagents_ws, logs_ws
+def reagent_db_to_app(row: dict) -> dict:
+    return {
+        "id": str(row.get("id", "")),
+        "name": row.get("name", "") or "",
+        "volume": row.get("amount", "") or "",
+        "manufacturer": row.get("company", "") or "",
+        "location": row.get("location", "") or "",
+        "stock_count": to_int(row.get("stock", 0)),
+        "waiting_count": to_int(row.get("pending", 0)),
+        "created_at": row.get("created_at", "") or "",
+        "updated_at": "",
+    }
 
 
 def load_reagents() -> pd.DataFrame:
-    if USE_GOOGLE_SHEETS:
-        reagents_ws, _ = get_google_worksheets()
-        records = reagents_ws.get_all_records()
-        return normalize_reagents(pd.DataFrame(records))
-
-    LOCAL_DATA_DIR.mkdir(exist_ok=True)
-    if not LOCAL_REAGENTS_FILE.exists():
-        df = pd.DataFrame(columns=REAGENT_COLUMNS)
-        df.to_csv(LOCAL_REAGENTS_FILE, index=False, encoding="utf-8-sig")
-        return df
-
-    return normalize_reagents(pd.read_csv(LOCAL_REAGENTS_FILE))
-
-
-def save_reagents(df: pd.DataFrame) -> None:
-    df = normalize_reagents(df)
-
-    if USE_GOOGLE_SHEETS:
-        reagents_ws, _ = get_google_worksheets()
-        values = [REAGENT_COLUMNS] + df.astype(str).values.tolist()
-        reagents_ws.clear()
-        reagents_ws.update(values=values, range_name="A1")
-        return
-
-    LOCAL_DATA_DIR.mkdir(exist_ok=True)
-    df.to_csv(LOCAL_REAGENTS_FILE, index=False, encoding="utf-8-sig")
+    supabase = get_supabase_client()
+    try:
+        result = supabase.table("reagents").select("*").order("name").execute()
+        rows = result.data or []
+        converted = [reagent_db_to_app(row) for row in rows]
+        return normalize_reagents(pd.DataFrame(converted))
+    except Exception as e:
+        st.error("Supabase에서 시약 데이터를 불러오지 못했습니다.")
+        st.exception(e)
+        return pd.DataFrame(columns=REAGENT_COLUMNS)
 
 
 def load_logs() -> pd.DataFrame:
-    if USE_GOOGLE_SHEETS:
-        _, logs_ws = get_google_worksheets()
-        records = logs_ws.get_all_records()
-        return normalize_logs(pd.DataFrame(records))
+    supabase = get_supabase_client()
+    try:
+        result = supabase.table("logs").select("*").order("created_at", desc=True).limit(100).execute()
+        rows = result.data or []
 
-    LOCAL_DATA_DIR.mkdir(exist_ok=True)
-    if not LOCAL_LOGS_FILE.exists():
-        df = pd.DataFrame(columns=LOG_COLUMNS)
-        df.to_csv(LOCAL_LOGS_FILE, index=False, encoding="utf-8-sig")
-        return df
+        converted = []
+        for row in rows:
+            converted.append({
+                "timestamp": row.get("created_at", "") or "",
+                "user": row.get("user_name", "") or "",
+                "category": "",
+                "reagent": row.get("reagent_name", "") or "",
+                "delta": str(row.get("amount", "")),
+                "message": row.get("action", "") or "",
+            })
 
-    return normalize_logs(pd.read_csv(LOCAL_LOGS_FILE))
+        return normalize_logs(pd.DataFrame(converted))
+    except Exception as e:
+        st.error("Supabase에서 로그 데이터를 불러오지 못했습니다.")
+        st.exception(e)
+        return pd.DataFrame(columns=LOG_COLUMNS)
 
 
 def append_log(user: str, category: str, reagent: str, delta: int, message: str) -> None:
-    row = [now_text(), user, category, reagent, str(delta), message]
-
-    if USE_GOOGLE_SHEETS:
-        _, logs_ws = get_google_worksheets()
-        logs_ws.append_row(row, value_input_option="USER_ENTERED")
-        return
-
-    LOCAL_DATA_DIR.mkdir(exist_ok=True)
-    logs = load_logs()
-    logs.loc[len(logs)] = row
-    logs.to_csv(LOCAL_LOGS_FILE, index=False, encoding="utf-8-sig")
+    supabase = get_supabase_client()
+    try:
+        supabase.table("logs").insert({
+            "reagent_name": reagent,
+            "user_name": user,
+            "action": message,
+            "amount": int(delta),
+        }).execute()
+    except Exception as e:
+        st.error("로그 저장에 실패했습니다.")
+        st.exception(e)
 
 
 # ============================================================
@@ -342,7 +303,7 @@ def append_log(user: str, category: str, reagent: str, delta: int, message: str)
 
 def update_count(reagent_id: str, field: str, delta: int, user_name: str) -> None:
     df = load_reagents()
-    idx_list = df.index[df["id"] == reagent_id].tolist()
+    idx_list = df.index[df["id"] == str(reagent_id)].tolist()
 
     if not idx_list:
         st.error("해당 시약을 찾을 수 없습니다. 새로고침 후 다시 시도해 주세요.")
@@ -355,12 +316,17 @@ def update_count(reagent_id: str, field: str, delta: int, user_name: str) -> Non
     current_value = to_int(df.at[idx, field])
     new_value = max(0, current_value + delta)
     actual_delta = new_value - current_value
-
-    df.at[idx, field] = new_value
-    df.at[idx, "updated_at"] = now_text()
-    save_reagents(df)
-
     abs_delta = abs(actual_delta)
+
+    db_field = "stock" if field == "stock_count" else "pending"
+    supabase = get_supabase_client()
+
+    try:
+        supabase.table("reagents").update({db_field: new_value}).eq("id", int(reagent_id)).execute()
+    except Exception as e:
+        st.error("수량 변경에 실패했습니다.")
+        st.exception(e)
+        return
 
     if field == "stock_count":
         if actual_delta < 0:
@@ -392,7 +358,7 @@ def update_count(reagent_id: str, field: str, delta: int, user_name: str) -> Non
 
 def receive_count(reagent_id: str, amount: int, user_name: str) -> None:
     df = load_reagents()
-    idx_list = df.index[df["id"] == reagent_id].tolist()
+    idx_list = df.index[df["id"] == str(reagent_id)].tolist()
 
     if not idx_list:
         st.error("해당 시약을 찾을 수 없습니다. 새로고침 후 다시 시도해 주세요.")
@@ -408,22 +374,31 @@ def receive_count(reagent_id: str, amount: int, user_name: str) -> None:
 
     name = df.at[idx, "name"]
     volume = df.at[idx, "volume"]
+    new_waiting = waiting - receive_amount
+    new_stock = to_int(df.at[idx, "stock_count"]) + receive_amount
 
-    df.at[idx, "waiting_count"] = waiting - receive_amount
-    df.at[idx, "stock_count"] = to_int(df.at[idx, "stock_count"]) + receive_amount
-    df.at[idx, "updated_at"] = now_text()
-    save_reagents(df)
+    supabase = get_supabase_client()
+
+    try:
+        supabase.table("reagents").update({
+            "pending": new_waiting,
+            "stock": new_stock,
+        }).eq("id", int(reagent_id)).execute()
+    except Exception as e:
+        st.error("입고 처리에 실패했습니다.")
+        st.exception(e)
+        return
 
     message = (
         f"{user_name}님이 {name} ({volume}) 시약 {receive_amount}통을 입고 처리했습니다. "
-        f"남은 수량: {df.at[idx, 'stock_count']}통, 배송 대기: {df.at[idx, 'waiting_count']}통"
+        f"남은 수량: {new_stock}통, 배송 대기: {new_waiting}통"
     )
     append_log(user_name, "입고", f"{name} ({volume})", receive_amount, message)
 
 
 def delete_reagent(reagent_id: str, user_name: str) -> None:
     df = load_reagents()
-    idx_list = df.index[df["id"] == reagent_id].tolist()
+    idx_list = df.index[df["id"] == str(reagent_id)].tolist()
 
     if not idx_list:
         st.error("해당 시약을 찾을 수 없습니다. 새로고침 후 다시 시도해 주세요.")
@@ -435,8 +410,14 @@ def delete_reagent(reagent_id: str, user_name: str) -> None:
     stock = to_int(df.at[idx, "stock_count"])
     waiting = to_int(df.at[idx, "waiting_count"])
 
-    df = df.drop(index=idx).reset_index(drop=True)
-    save_reagents(df)
+    supabase = get_supabase_client()
+
+    try:
+        supabase.table("reagents").delete().eq("id", int(reagent_id)).execute()
+    except Exception as e:
+        st.error("시약 삭제에 실패했습니다.")
+        st.exception(e)
+        return
 
     message = (
         f"{user_name}님이 {name} ({volume}) 시약을 삭제했습니다. "
@@ -446,36 +427,36 @@ def delete_reagent(reagent_id: str, user_name: str) -> None:
 
 
 def add_reagent(name: str, volume: str, manufacturer: str, location: str, stock_count: int, waiting_count: int, user_name: str) -> None:
-    df = load_reagents()
-    created = now_text()
+    supabase = get_supabase_client()
 
-    new_row = {
-        "id": make_id(),
+    payload = {
         "name": name.strip(),
-        "volume": volume.strip(),
-        "manufacturer": manufacturer.strip(),
+        "amount": volume.strip(),
+        "company": manufacturer.strip(),
         "location": location.strip(),
-        "stock_count": max(0, int(stock_count)),
-        "waiting_count": max(0, int(waiting_count)),
-        "created_at": created,
-        "updated_at": created,
+        "stock": max(0, int(stock_count)),
+        "pending": max(0, int(waiting_count)),
     }
 
-    df.loc[len(df)] = new_row
-    save_reagents(df)
+    try:
+        result = supabase.table("reagents").insert(payload).execute()
+    except Exception as e:
+        st.error("신규 시약 등록에 실패했습니다.")
+        st.exception(e)
+        return
 
-    detail_parts = [new_row['volume']]
-    if new_row.get('manufacturer'):
-        detail_parts.append(new_row['manufacturer'])
-    if new_row.get('location'):
-        detail_parts.append(new_row['location'])
+    detail_parts = [payload["amount"]]
+    if payload["company"]:
+        detail_parts.append(payload["company"])
+    if payload["location"]:
+        detail_parts.append(payload["location"])
     detail_text = " / ".join(detail_parts)
 
     message = (
-        f"{user_name}님이 신규 시약 {new_row['name']} ({detail_text})을 등록했습니다. "
-        f"남은 수량: {new_row['stock_count']}통, 배송 대기: {new_row['waiting_count']}통"
+        f"{user_name}님이 신규 시약 {payload['name']} ({detail_text})을 등록했습니다. "
+        f"남은 수량: {payload['stock']}통, 배송 대기: {payload['pending']}통"
     )
-    append_log(user_name, "신규 등록", f"{new_row['name']} ({new_row['volume']})", stock_count, message)
+    append_log(user_name, "신규 등록", f"{payload['name']} ({payload['amount']})", payload["stock"], message)
 
 
 # ============================================================
@@ -565,14 +546,14 @@ with left:
 with right:
     user_name = get_current_user()
 
-storage_badge = "Google Sheets 공유 저장소" if USE_GOOGLE_SHEETS else "로컬 CSV 테스트 모드"
+storage_badge = "Supabase 공유 저장소" if USE_SUPABASE else "Supabase 연결 정보 없음"
 st.caption(f"현재 저장 방식: {storage_badge}")
 
-if not USE_GOOGLE_SHEETS:
-    st.info(
-        "현재 온라인 모드로 실행 중입니다. "
-        "팀원들과 동일한 데이터를 공유합니다."
-    )
+if USE_SUPABASE:
+    st.info("현재 Supabase 온라인 DB에 저장 중입니다. 휴면 상태에서 다시 실행해도 데이터가 유지됩니다.")
+else:
+    st.error("Supabase 연결 정보가 없습니다. Streamlit Secrets에 SUPABASE_URL, SUPABASE_KEY를 입력해 주세요.")
+    st.stop()
 
 df = load_reagents()
 
@@ -587,7 +568,7 @@ with tab1:
     st.caption("재고와 주문/배송 대기를 한 카드 안에서 바로 확인하고 조절합니다.")
 
     if not STYLABLE_CONTAINER_AVAILABLE:
-        st.warning("카드 색상 표시를 위해 streamlit-extras 설치가 필요합니다. cmd에서 'py -m pip install streamlit-extras'를 실행해 주세요.")
+        st.warning("카드 색상 표시를 위해 streamlit-extras 설치가 필요합니다. requirements.txt에 streamlit-extras를 추가해 주세요.")
 
     if df.empty:
         st.warning("아직 등록된 시약이 없습니다. 먼저 신규 시약을 등록해 주세요.")
@@ -598,6 +579,8 @@ with tab1:
             shown = shown[
                 shown["name"].str.lower().str.contains(search, na=False)
                 | shown["volume"].str.lower().str.contains(search, na=False)
+                | shown["manufacturer"].str.lower().str.contains(search, na=False)
+                | shown["location"].str.lower().str.contains(search, na=False)
             ]
 
         if shown.empty:
@@ -761,7 +744,7 @@ with st.expander("로그 확인", expanded=False):
 
         for _, row in logs.iterrows():
             st.markdown(
-                f"**{safe_text(row['timestamp'])}**  \\n"
+                f"**{safe_text(row['timestamp'])}**  \n"
                 f"{safe_text(row['message'])}"
             )
             st.divider()
