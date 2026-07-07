@@ -19,5 +19,7 @@ jobs:
 
       - name: Ping Streamlit App
         run: |
-          curl -sS -L -f \
-            "https://reagent-manager-c8gyrc9nyim7bkcnpip9jr.streamlit.app"
+          curl -sS --max-time 60 \
+            -o /dev/null \
+            -w "Streamlit HTTP status: %{http_code}\n" \
+            "https://reagent-manager-c8gyrc9nyim7bkcnpip9jr.streamlit.app/" || true
