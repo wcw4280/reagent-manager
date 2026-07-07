@@ -1,8 +1,8 @@
-name: Keep Supabase Alive
+name: Keep App and Supabase Alive
 
 on:
   schedule:
-    - cron: "15 0 * * *"
+    - cron: "17 */6 * * *"
   workflow_dispatch:
 
 jobs:
@@ -16,3 +16,8 @@ jobs:
             "${{ secrets.SUPABASE_URL }}/rest/v1/reagents?select=id&limit=1" \
             -H "apikey: ${{ secrets.SUPABASE_KEY }}" \
             -H "Authorization: Bearer ${{ secrets.SUPABASE_KEY }}"
+
+      - name: Ping Streamlit App
+        run: |
+          curl -sS -L -f \
+            "https://reagent-manager-c8gyrc9nyim7bkcnpip9jr.streamlit.app"
