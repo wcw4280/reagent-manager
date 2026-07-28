@@ -120,6 +120,65 @@ def count_color(count: int) -> str:
     return "#2e7d32"
 
 
+def render_inventory_summary(df: pd.DataFrame) -> None:
+    """
+    등록된 모든 시약의 현재 재고를 가로형 요약표로 표시합니다.
+    시약 수가 많아지면 표 내부에서 가로 스크롤할 수 있습니다.
+    """
+    if df is None or df.empty:
+        return
+
+    summary_df = df.sort_values(["name", "volume", "manufacturer"]).copy()
+
+    header_cells = []
+    stock_cells = []
+
+    for _, row in summary_df.iterrows():
+        name = safe_text(display_text(row.get("name", "")))
+        volume = safe_text(display_text(row.get("volume", "")))
+        manufacturer = safe_text(display_text(row.get("manufacturer", "")))
+        stock = to_int(row.get("stock_count", 0))
+        stock_text_color = count_color(stock)
+
+        details = []
+        if volume:
+            details.append(volume)
+        if manufacturer:
+            details.append(manufacturer)
+        detail_text = " · ".join(details)
+
+        header_cells.append(
+            "<th class='inventory-summary-reagent'>"
+            f"<div class='inventory-summary-name'>{name}</div>"
+            f"<div class='inventory-summary-detail'>{detail_text}</div>"
+            "</th>"
+        )
+
+        stock_cells.append(
+            "<td class='inventory-summary-stock'>"
+            f"<span style='color:{stock_text_color};'>{stock}통</span>"
+            "</td>"
+        )
+
+    summary_html = (
+        "<div class='inventory-summary-heading'>전체 재고 한눈에 보기</div>"
+        "<div class='inventory-summary-scroll'>"
+        "<table class='inventory-summary-table'>"
+        "<thead><tr>"
+        "<th class='inventory-summary-label inventory-summary-corner'>시약</th>"
+        + "".join(header_cells)
+        + "</tr></thead>"
+        "<tbody><tr>"
+        "<th class='inventory-summary-label'>현재 재고</th>"
+        + "".join(stock_cells)
+        + "</tr></tbody>"
+        "</table>"
+        "</div>"
+    )
+
+    st.markdown(summary_html, unsafe_allow_html=True)
+
+
 def normalize_reagents(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=REAGENT_COLUMNS)
@@ -513,6 +572,81 @@ st.markdown(
         color: #64748b;
         font-size: 0.85rem;
     }
+    .inventory-summary-heading {
+        font-size: 1.02rem;
+        font-weight: 800;
+        color: #0f172a;
+        margin-top: 0.8rem;
+        margin-bottom: 0.45rem;
+    }
+    .inventory-summary-scroll {
+        width: 100%;
+        overflow-x: auto;
+        overflow-y: hidden;
+        margin-bottom: 1.15rem;
+        border: 1px solid #d9e1ea;
+        border-radius: 14px;
+        background: #ffffff;
+        box-shadow: 0 1px 5px rgba(15, 23, 42, 0.05);
+    }
+    .inventory-summary-table {
+        width: max-content;
+        min-width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        table-layout: fixed;
+    }
+    .inventory-summary-table th,
+    .inventory-summary-table td {
+        min-width: 145px;
+        padding: 11px 14px;
+        text-align: center;
+        vertical-align: middle;
+        border-right: 1px solid #e5e7eb;
+        white-space: nowrap;
+    }
+    .inventory-summary-table th:last-child,
+    .inventory-summary-table td:last-child {
+        border-right: none;
+    }
+    .inventory-summary-table thead th {
+        background: #f8fafc;
+        border-bottom: 1px solid #e5e7eb;
+    }
+    .inventory-summary-label {
+        position: sticky;
+        left: 0;
+        z-index: 2;
+        min-width: 108px !important;
+        width: 108px;
+        background: #f8fafc !important;
+        color: #334155;
+        font-size: 0.9rem;
+        font-weight: 800;
+    }
+    .inventory-summary-corner {
+        z-index: 3;
+    }
+    .inventory-summary-reagent {
+        height: 62px;
+    }
+    .inventory-summary-name {
+        color: #0f172a;
+        font-size: 1rem;
+        font-weight: 850;
+        line-height: 1.2;
+    }
+    .inventory-summary-detail {
+        color: #64748b;
+        font-size: 0.76rem;
+        font-weight: 500;
+        margin-top: 0.2rem;
+    }
+    .inventory-summary-stock {
+        background: #ffffff;
+        font-size: 1.2rem;
+        font-weight: 900;
+    }
     div[data-testid="stButton"] > button {
         height: 2.15rem;
         border-radius: 10px;
@@ -569,6 +703,9 @@ with tab1:
 
     if not STYLABLE_CONTAINER_AVAILABLE:
         st.warning("카드 색상 표시를 위해 streamlit-extras 설치가 필요합니다. requirements.txt에 streamlit-extras를 추가해 주세요.")
+
+    if not df.empty:
+        render_inventory_summary(df)
 
     if df.empty:
         st.warning("아직 등록된 시약이 없습니다. 먼저 신규 시약을 등록해 주세요.")
